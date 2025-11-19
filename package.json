@@ -1,0 +1,24 @@
+{
+  "name": "neondb-b2-backup",
+  "version": "1.0.0",
+  "description": "Automated NeonDB backup to Backblaze B2 using Cloudflare Workers and Alchemy",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "bun alchemy.run.ts",
+    "tail": "wrangler tail"
+  },
+  "keywords": ["neondb", "backup", "cloudflare-workers", "b2", "alchemy"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@alchemy-org/core": "^0.5.0",
+    "@alchemy-org/cloudflare": "^0.5.0",
+    "@neondatabase/serverless": "^0.9.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241022.0",
+    "wrangler": "^3.84.0",
+    "typescript": "^5.6.0"
+  }
+}
