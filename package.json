@@ -1,7 +1,7 @@
 {
-  "name": "neondb-b2-backup",
+  "name": "neondb-cloudflare-backup",
   "version": "1.0.0",
-  "description": "Automated NeonDB backup to Backblaze B2 using Cloudflare Workers and Alchemy",
+  "description": "Automated NeonDB backup to Cloudflare R2 using Cloudflare Workers and Alchemy",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",

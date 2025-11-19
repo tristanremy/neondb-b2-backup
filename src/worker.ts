@@ -22,15 +22,13 @@ app.get('/', (c) => {
   });
 });
 
-app.use('/backups', async (c, next) => {
+// Apply auth middleware to protected routes
+const authMiddleware = async (c: any, next: any) => {
   const auth = bearerAuth({ token: c.env.API_TOKEN });
   return auth(c, next);
-});
-
-app.use('/backup', async (c, next) => {
-  const auth = bearerAuth({ token: c.env.API_TOKEN });
-  return auth(c, next);
-});
+};
+app.use('/backups', authMiddleware);
+app.use('/backup', authMiddleware);
 
 app.get('/backups', async (c) => {
   try {
@@ -76,43 +74,40 @@ async function listBackups(env: Env): Promise<string[]> {
 }
 
 async function backupDatabase(env: Env): Promise<string> {
-  const date = new Date().toISOString().split('T')[0];
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const now = new Date();
+  const date = now.toISOString().split('T')[0];
+  const timestamp = now.toISOString().replace(/[:.]/g, '-');
   const filename = `backup-${timestamp}.sql`;
+  const dbName = env.NEON_DATABASE_URL.split('@')[1]?.split('/')[1] || 'unknown';
+
+  const client = new Client(env.NEON_DATABASE_URL);
 
   try {
     console.log('🔄 Starting backup...');
-
-    // 1. Connect to Neon database
-    const client = new Client(env.NEON_DATABASE_URL);
     await client.connect();
 
-    // 2. Generate SQL dump
+    // Get all tables in one query
     const tables = await client.query(`
       SELECT tablename FROM pg_tables
       WHERE schemaname = 'public'
       ORDER BY tablename
     `);
 
-    let dump = `-- NeonDB Backup\n`;
-    dump += `-- Date: ${new Date().toISOString()}\n`;
-    dump += `-- Database: ${env.NEON_DATABASE_URL.split('@')[1]?.split('/')[1] || 'unknown'}\n\n`;
+    // Build dump using array for better performance
+    const dumpParts: string[] = [
+      '-- NeonDB Backup',
+      `-- Date: ${now.toISOString()}`,
+      `-- Database: ${dbName}`,
+      '',
+    ];
 
     for (const { tablename } of tables.rows) {
       console.log(`📦 Dumping table: ${tablename}`);
 
-      // Get table schema
-      const schema = await client.query(`
-        SELECT column_name, data_type, character_maximum_length
-        FROM information_schema.columns
-        WHERE table_schema = 'public' AND table_name = $1
-        ORDER BY ordinal_position
-      `, [tablename]);
+      dumpParts.push(`-- Table: ${tablename}`);
+      dumpParts.push(`DROP TABLE IF EXISTS "${tablename}" CASCADE;`);
 
-      dump += `-- Table: ${tablename}\n`;
-      dump += `DROP TABLE IF EXISTS "${tablename}" CASCADE;\n`;
-
-      // Get CREATE TABLE statement (simplified version)
+      // Get CREATE TABLE statement
       const createTableResult = await client.query(`
         SELECT
           'CREATE TABLE "' || $1 || '" (' ||
@@ -131,44 +126,50 @@ async function backupDatabase(env: Env): Promise<string> {
       `, [tablename]);
 
       if (createTableResult.rows.length > 0) {
-        dump += createTableResult.rows[0].create_statement + '\n';
+        dumpParts.push(createTableResult.rows[0].create_statement);
       }
 
       // Get data
       const result = await client.query(`SELECT * FROM "${tablename}"`);
 
       if (result.rows.length > 0) {
-        dump += `\n-- Data for ${tablename}\n`;
+        dumpParts.push(`-- Data for ${tablename}`);
 
-        for (const row of result.rows) {
-          const values = Object.values(row).map(val => {
-            if (val === null) return 'NULL';
-            if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`;
-            if (val instanceof Date) return `'${val.toISOString()}'`;
-            return val;
-          });
+        // Batch INSERT statements for better performance
+        const batchSize = 100;
+        for (let i = 0; i < result.rows.length; i += batchSize) {
+          const batch = result.rows.slice(i, i + batchSize);
+          const columns = Object.keys(batch[0]).map(col => `"${col}"`).join(', ');
 
-          const columns = Object.keys(row).map(col => `"${col}"`).join(', ');
-          dump += `INSERT INTO "${tablename}" (${columns}) VALUES (${values.join(', ')});\n`;
+          for (const row of batch) {
+            const values = Object.values(row).map(val => {
+              if (val === null) return 'NULL';
+              if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`;
+              if (val instanceof Date) return `'${val.toISOString()}'`;
+              return val;
+            });
+            dumpParts.push(`INSERT INTO "${tablename}" (${columns}) VALUES (${values.join(', ')});`);
+          }
         }
       }
 
-      dump += '\n';
+      dumpParts.push('');
     }
 
     await client.end();
+
+    const dump = dumpParts.join('\n');
     console.log(`✅ Database dump completed (${dump.length} bytes)`);
 
-    // 3. Upload to Cloudflare R2
+    // Upload to R2
     console.log('📤 Uploading to R2...');
-
     await env.BACKUP_BUCKET.put(filename, dump, {
       httpMetadata: {
         contentType: 'application/sql',
       },
       customMetadata: {
         'backup-date': date,
-        'database': env.NEON_DATABASE_URL.split('@')[1]?.split('/')[1] || 'unknown',
+        'database': dbName,
       },
     });
 
@@ -179,5 +180,10 @@ async function backupDatabase(env: Env): Promise<string> {
   } catch (error) {
     console.error('❌ Backup failed:', error);
     throw error;
+  } finally {
+    // Ensure connection is closed even if there's an error
+    try {
+      await client.end();
+    } catch {}
   }
 }

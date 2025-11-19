@@ -3,7 +3,8 @@
     "allow": [
       "Bash(bun install)",
       "Bash(bun add:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(git add:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
