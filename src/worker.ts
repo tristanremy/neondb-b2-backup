@@ -1,35 +1,81 @@
+import { Hono } from 'hono';
+import { bearerAuth } from 'hono/bearer-auth';
 import { Client } from '@neondatabase/serverless';
 
 interface Env {
   NEON_DATABASE_URL: string;
-  B2_KEY_ID: string;
-  B2_APP_KEY: string;
-  B2_BUCKET: string;
-  B2_ENDPOINT: string;
+  API_TOKEN: string;
+  BACKUP_BUCKET: R2Bucket;
 }
+
+const app = new Hono<{ Bindings: Env }>();
+
+app.get('/', (c) => {
+  return c.json({
+    message: 'NeonDB to Cloudflare R2 Backup API',
+    endpoints: {
+      'GET /': 'This help message',
+      'GET /backups': 'List all backup files (requires auth)',
+      'POST /backup': 'Trigger a manual backup (requires auth)',
+    },
+    authentication: 'Bearer token required for protected endpoints',
+  });
+});
+
+app.use('/backups', async (c, next) => {
+  const auth = bearerAuth({ token: c.env.API_TOKEN });
+  return auth(c, next);
+});
+
+app.use('/backup', async (c, next) => {
+  const auth = bearerAuth({ token: c.env.API_TOKEN });
+  return auth(c, next);
+});
+
+app.get('/backups', async (c) => {
+  try {
+    const backups = await listBackups(c.env);
+    return c.json({
+      count: backups.length,
+      backups,
+    });
+  } catch (error) {
+    console.error('Failed to list backups:', error);
+    return c.json({ error: `Failed to list backups: ${error}` }, 500);
+  }
+});
+
+app.post('/backup', async (c) => {
+  try {
+    const filename = await backupDatabase(c.env);
+    return c.json({
+      message: 'Backup completed successfully',
+      filename,
+    });
+  } catch (error) {
+    console.error('Backup failed:', error);
+    return c.json({ error: `Backup failed: ${error}` }, 500);
+  }
+});
 
 export default {
   async scheduled(event: ScheduledEvent, env: Env) {
     await backupDatabase(env);
   },
 
-  // Pour tester manuellement via HTTP
-  async fetch(request: Request, env: Env) {
-    if (request.method !== 'POST') {
-      return new Response('Use POST to trigger backup manually', { status: 405 });
-    }
-
-    try {
-      await backupDatabase(env);
-      return new Response('Backup completed successfully', { status: 200 });
-    } catch (error) {
-      console.error('Backup failed:', error);
-      return new Response(`Backup failed: ${error}`, { status: 500 });
-    }
-  },
+  fetch: app.fetch,
 };
 
-async function backupDatabase(env: Env) {
+async function listBackups(env: Env): Promise<string[]> {
+  const listed = await env.BACKUP_BUCKET.list({
+    prefix: 'backup-',
+    limit: 1000,
+  });
+
+  return listed.objects.map(obj => obj.key);
+}
+
+async function backupDatabase(env: Env): Promise<string> {
   const date = new Date().toISOString().split('T')[0];
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const filename = `backup-${timestamp}.sql`;
@@ -113,29 +159,23 @@ async function backupDatabase(env: Env) {
     await client.end();
     console.log(`✅ Database dump completed (${dump.length} bytes)`);
 
-    // 3. Upload to Backblaze B2
-    console.log('📤 Uploading to B2...');
+    // 3. Upload to Cloudflare R2
+    console.log('📤 Uploading to R2...');
 
-    const url = `https://${env.B2_ENDPOINT}/${env.B2_BUCKET}/${filename}`;
-    const auth = btoa(`${env.B2_KEY_ID}:${env.B2_APP_KEY}`);
-
-    const response = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'Content-Type': 'application/sql',
-        'X-Bz-Info-Backup-Date': date,
+    await env.BACKUP_BUCKET.put(filename, dump, {
+      httpMetadata: {
+        contentType: 'application/sql',
       },
-      body: dump,
+      customMetadata: {
+        'backup-date': date,
+        'database': env.NEON_DATABASE_URL.split('@')[1]?.split('/')[1] || 'unknown',
+      },
     });
-
-    if (!response.ok) {
-      throw new Error(`B2 upload failed: ${response.status} ${response.statusText}`);
-    }
 
     console.log(`✅ Backup uploaded successfully: ${filename}`);
     console.log(`📊 Backup size: ${(dump.length / 1024).toFixed(2)} KB`);
 
+    return filename;
   } catch (error) {
     console.error('❌ Backup failed:', error);
     throw error;

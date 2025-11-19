@@ -1,22 +1,23 @@
-# 🗄️ NeonDB → Backblaze B2 Backup
+# 🗄️ NeonDB → Cloudflare R2 Backup
 
-Automated daily backups of NeonDB to Backblaze B2 using Cloudflare Workers, deployed with Alchemy (Infrastructure as Code in TypeScript).
+Automated daily backups of NeonDB to Cloudflare R2 using Cloudflare Workers, deployed with Alchemy (Infrastructure as Code in TypeScript).
 
 ## ✨ Features
 
 - 🔄 **Automated daily backups** at 01:00 UTC (configurable)
+- 🌐 **REST API** - List backups and trigger manual backups via HTTP endpoints (powered by Hono)
 - 🚀 **Serverless** - runs on Cloudflare Workers (free tier: 100k requests/day)
 - 📦 **Full SQL dumps** with schema + data
-- 🔐 **Secure** - credentials stored as encrypted secrets
+- 🔐 **Secure** - credentials stored as encrypted secrets, Bearer token authentication
 - 🛠️ **Type-safe IaC** - infrastructure defined in TypeScript with Alchemy
-- 💰 **Cost-effective** - ~$0.005/GB/month on B2
+- 💰 **Cost-effective** - R2 free tier: 10GB storage, no egress fees
 
 ## 🏗️ Architecture
 
 ```
 ┌─────────────┐      ┌──────────────────┐      ┌─────────────┐
-│  NeonDB     │ ───► │  CF Worker       │ ───► │ Backblaze   │
-│  (Postgres) │      │  (Daily @ 1AM)   │      │ B2 Bucket   │
+│  NeonDB     │ ───► │  CF Worker       │ ───► │ Cloudflare  │
+│  (Postgres) │      │  (Daily @ 1AM)   │      │  R2 Bucket  │
 └─────────────┘      └──────────────────┘      └─────────────┘
                             │
                             │ Managed by
@@ -32,7 +33,6 @@ Automated daily backups of NeonDB to Backblaze B2 using Cloudflare Workers, depl
 - [Bun](https://bun.sh) runtime installed
 - [Cloudflare](https://dash.cloudflare.com) account (free tier OK)
 - [NeonDB](https://console.neon.tech) database
-- [Backblaze B2](https://www.backblaze.com/b2/cloud-storage.html) account
 
 ## 🚀 Quick Start
 
@@ -53,15 +53,15 @@ cp .env.example .env
 Edit `.env`:
 
 ```bash
+# Alchemy Encryption Password (generate a secure random password)
+ALCHEMY_PASSWORD=your-secure-random-password-here
+
+# API Authentication Token (generate with: openssl rand -base64 32)
+API_TOKEN=your-secure-api-token-here
+
 # NeonDB Connection String
 # Format: postgresql://user:password@host.neon.tech/dbname?sslmode=require
 NEON_DATABASE_URL=postgresql://...
-
-# Backblaze B2 Credentials
-B2_KEY_ID=your_key_id
-B2_APP_KEY=your_application_key
-B2_BUCKET=your-bucket-name
-B2_ENDPOINT=s3.us-west-004.backblazeb2.com
 ```
 
 #### Getting Credentials:
@@ -69,12 +69,7 @@ B2_ENDPOINT=s3.us-west-004.backblazeb2.com
 **NeonDB:**
 1. Go to [Neon Console](https://console.neon.tech/)
 2. Select your project → "Connection String"
-3. Copy the connection string
-
-**Backblaze B2:**
-1. Create a bucket: [B2 Buckets](https://secure.backblaze.com/b2_buckets.htm)
-2. Create app key: [App Keys](https://secure.backblaze.com/app_keys.htm)
-3. Note the endpoint for your region (shown in bucket details)
+3. Copy the connection string (make sure it includes `?sslmode=require`)
 
 ### 3. Login to Cloudflare
 
@@ -91,6 +86,7 @@ bun deploy
 ```
 
 That's it! 🎉 Alchemy will:
+- ✅ Create the Cloudflare R2 bucket
 - ✅ Create the Cloudflare Worker
 - ✅ Configure all secrets securely
 - ✅ Set up the cron schedule (daily at 01:00 UTC)
@@ -98,21 +94,54 @@ That's it! 🎉 Alchemy will:
 
 ## 🛠️ Usage
 
-### Test Backup Manually
+### API Endpoints
 
-Trigger a backup without waiting for the cron:
+The worker provides a REST API powered by Hono:
 
+**🏠 View API Documentation**
 ```bash
-# Get your worker URL from Cloudflare dashboard
-curl -X POST https://neondb-backup.YOUR-SUBDOMAIN.workers.dev
+curl https://YOUR-WORKER-URL.workers.dev/
 ```
 
-Or use Wrangler:
+**📋 List All Backups**
+```bash
+curl -H "Authorization: Bearer YOUR_API_TOKEN" https://YOUR-WORKER-URL.workers.dev/backups
+```
+
+Response:
+```json
+{
+  "count": 3,
+  "backups": [
+    "backup-2025-11-19T10-30-00-000Z.sql",
+    "backup-2025-11-19T01-00-00-000Z.sql",
+    "backup-2025-11-18T01-00-00-000Z.sql"
+  ]
+}
+```
+
+**🔄 Create Manual Backup**
+```bash
+curl -X POST -H "Authorization: Bearer YOUR_API_TOKEN" https://YOUR-WORKER-URL.workers.dev/backup
+```
+
+Response:
+```json
+{
+  "message": "Backup completed successfully",
+  "filename": "backup-2025-11-19T10-30-00-000Z.sql"
+}
+```
+
+### Local Development
+
+Test locally with Wrangler:
 
 ```bash
 bun wrangler dev
 # Then in another terminal:
-curl -X POST http://localhost:8787
+curl http://localhost:8787/backups
+curl -X POST http://localhost:8787/backup
 ```
 
 ### View Logs
@@ -130,31 +159,30 @@ Or check the Cloudflare dashboard: Workers & Pages → neondb-backup → Logs
 Edit `alchemy.run.ts` and change the cron expression:
 
 ```typescript
-triggers: {
-  crons: ['0 1 * * *'],  // Daily at 1 AM UTC
-  // Examples:
-  // crons: ['0 */6 * * *'],     // Every 6 hours
-  // crons: ['0 2 * * 1'],       // Weekly on Monday at 2 AM
-  // crons: ['0 3 1 * *'],       // Monthly on 1st at 3 AM
-},
+crons: ['0 1 * * *'],  // Daily at 1 AM UTC
+// Examples:
+// crons: ['0 */6 * * *'],     // Every 6 hours
+// crons: ['0 2 * * 1'],       // Weekly on Monday at 2 AM
+// crons: ['0 3 1 * *'],       // Monthly on 1st at 3 AM
 ```
 
 Then redeploy:
 
 ```bash
-bun deploy
+bun run deploy
 ```
 
 ## 📁 Project Structure
 
 ```
-neondb-b2-backup/
+neondb-r2-backup/
 ├── alchemy.run.ts       # Infrastructure as Code (IaC)
 ├── src/
 │   └── worker.ts        # Backup logic
 ├── package.json         # Dependencies
 ├── tsconfig.json        # TypeScript config
 ├── .env.example         # Environment template
+├── SECURITY.md          # Security documentation
 └── README.md
 ```
 
@@ -164,11 +192,9 @@ neondb-b2-backup/
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `NEON_DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@...` |
-| `B2_KEY_ID` | Backblaze key ID | `0011a234b567c890d...` |
-| `B2_APP_KEY` | Backblaze application key | `K001abcd1234...` |
-| `B2_BUCKET` | Bucket name | `my-db-backups` |
-| `B2_ENDPOINT` | S3-compatible endpoint | `s3.us-west-004.backblazeb2.com` |
+| `ALCHEMY_PASSWORD` | Alchemy encryption password | Secure random string |
+| `API_TOKEN` | API authentication token | Generated via `openssl rand -base64 32` |
+| `NEON_DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@host/db?sslmode=require` |
 
 ### Backup Format
 
@@ -189,14 +215,14 @@ Each backup includes:
 **Traditional approach (wrangler.toml):**
 ```bash
 wrangler secret put NEON_DATABASE_URL
-wrangler secret put B2_KEY_ID
-wrangler secret put B2_APP_KEY
+wrangler secret put API_TOKEN
+wrangler r2 bucket create neondb-backups
 # ... manually configure crons, bindings, etc.
 ```
 
 **With Alchemy:**
 ```bash
-bun deploy  # That's it! 🚀
+bun run deploy  # That's it! 🚀
 ```
 
 Benefits:
@@ -213,26 +239,39 @@ Benefits:
 - ✅ Daily backup = ~365 requests/year
 - **Cost: $0/month** 🎉
 
-**Backblaze B2:**
-- Storage: $0.005/GB/month
-- Download: $0.01/GB (first 1GB free)
-- Example: 100MB backup × 30 days = 3GB = **$0.015/month**
+**Cloudflare R2 (Free Tier):**
+- ✅ 10 GB storage/month
+- ✅ 1 million Class A operations/month (writes)
+- ✅ 10 million Class B operations/month (reads)
+- ✅ **No egress fees** (unlike S3/B2)
+- Example: 100MB backup × 30 days = 3GB
+- **Cost: $0/month** 🎉
 
-**Total: ~$0.02/month** 💰
+**Total: $0/month** 💰
 
 ## 🔐 Security
 
+### Authentication
+- **Bearer token authentication** required for all API endpoints
+- Generate secure tokens: `openssl rand -base64 32`
+- Store `API_TOKEN` in your `.env` file
+
+### Secrets Management
 - All secrets encrypted by Cloudflare Workers
+- Alchemy password encrypts infrastructure state
 - Database credentials never exposed in code
-- B2 credentials use least-privilege app keys
-- SSL/TLS for all connections (NeonDB + B2)
+- SSL/TLS for all connections (NeonDB + R2)
 
 ### Best Practices
 
-1. **B2 App Keys**: Create bucket-specific keys with write-only permissions
-2. **Neon**: Use read-only connection strings if possible
-3. **Bucket**: Make bucket private (not public)
-4. **Lifecycle**: Set B2 lifecycle rules to auto-delete old backups
+1. **API Access**: Never share your API token publicly
+2. **R2 Bucket**: Buckets are private by default (not publicly accessible)
+3. **Neon**: Use connection strings with `?sslmode=require`
+4. **Lifecycle**: Configure R2 lifecycle rules to auto-delete old backups
+5. **Git**: Never commit `.env` or `.alchemy/` directory
+6. **Token Rotation**: Rotate API_TOKEN regularly (every 90 days)
+
+**📖 See [SECURITY.md](SECURITY.md) for comprehensive security documentation**
 
 ## 🐛 Troubleshooting
 
@@ -246,14 +285,12 @@ bun wrangler login
 
 Check your `NEON_DATABASE_URL` includes `?sslmode=require`
 
-### B2 upload fails with 401
+### R2 upload fails
 
-Verify your `B2_KEY_ID` and `B2_APP_KEY` are correct:
-```bash
-# Test with curl
-curl -H "Authorization: Basic $(echo -n 'KEY_ID:APP_KEY' | base64)" \
-  https://YOUR_ENDPOINT/YOUR_BUCKET/test.txt
-```
+Verify your Cloudflare account has R2 enabled:
+1. Go to [Cloudflare Dashboard](https://dash.cloudflare.com/)
+2. Navigate to R2
+3. Enable R2 if not already enabled
 
 ### "No tables found"
 
@@ -262,12 +299,17 @@ Ensure your NeonDB has tables in the `public` schema:
 SELECT tablename FROM pg_tables WHERE schemaname = 'public';
 ```
 
+### Authentication fails (401/403)
+
+Verify your `API_TOKEN` is correct and matches the one in your `.env` file
+
 ## 📚 Resources
 
-- [Alchemy Docs](https://alchemy.so/docs)
+- [Alchemy Docs](https://alchemy.run/)
 - [Cloudflare Workers Docs](https://developers.cloudflare.com/workers/)
+- [Cloudflare R2 Docs](https://developers.cloudflare.com/r2/)
 - [NeonDB Docs](https://neon.tech/docs)
-- [Backblaze B2 Docs](https://www.backblaze.com/b2/docs/)
+- [Hono Docs](https://hono.dev/)
 
 ## 🤝 Contributing
 
